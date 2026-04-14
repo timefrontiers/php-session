@@ -1,0 +1,50 @@
+{
+  "name": "timefrontiers/php-session",
+  "description": "Modern PHP session manager with authentication state, access control, and CSRF protection",
+  "keywords": ["php", "session", "manager", "security", "csrf", "authentication", "access-control"],
+  "homepage": "https://github.com/timefrontiers/php-session",
+  "type": "library",
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "Ikechukwu Okalia",
+      "email": "consult@ikechukwuokalia.dev",
+      "homepage": "https://ikechukwuokalia.dev",
+      "role": "developer"
+    },
+    {
+      "name": "Time Frontiers Ltd",
+      "email": "git@timefrontiers.com",
+      "homepage": "https://git.timefrontiers.com",
+      "role": "developer"
+    }
+  ],
+  "require": {
+    "php": ">=8.1",
+    "psr/log": "^3.0",
+    "timefrontiers/php-location": "^1.0",
+    "timefrontiers/php-instance-error": "^1.0"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.0",
+    "phpstan/phpstan": "^1.10"
+  },
+  "suggest": {
+    "ext-redis": "For Redis session storage",
+    "symfony/http-foundation": "For better request/response handling"
+  },
+  "autoload": {
+    "psr-4": {
+      "TimeFrontiers\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "TimeFrontiers\\Tests\\": "tests/"
+    }
+  },
+  "scripts": {
+    "test": "phpunit",
+    "analyse": "phpstan analyse src tests --level=max"
+  }
+}
