@@ -12,8 +12,33 @@ use Psr\Log\NullLogger;
  *
  * Errors are collected in the static $_errors array and can be retrieved
  * using the InstanceError class.
+ *
+ * @example
+ * ```php
+ * // Start session
+ * $session = new Session();
+ *
+ * // Check login state
+ * if (!$session->isLoggedIn()) {
+ *   // Login user
+ *   $session->login($user, remember: true);
+ * }
+ *
+ * // Access control
+ * if ($session->access_rank >= AccessRank::MODERATOR->value) {
+ *   // Show admin panel
+ * }
+ *
+ * // CSRF protection
+ * $token = $session->generateCSRFToken('contact_form');
+ * // In form handler:
+ * if (!$session->validateCSRFToken('contact_form', $_POST['token'])) {
+ *   die('Invalid token');
+ * }
+ * ```
  */
 final class Session {
+
   private bool $_logged_in = false;
   private int $_expire = 0;
   private int|string|null $_id = null;
@@ -43,18 +68,18 @@ final class Session {
    * @var array Static error collection.
    *            Format: ['context' => [[min_rank, code, message, file, line], ...]]
    */
-  public static array $_errors = [];
+  protected static array $_errors = [];
 
   /**
    * @param LoggerInterface|null $logger PSR-3 logger for internal logging.
    * @throws SessionException If session cannot be started.
    */
-  public function __construct(?LoggerInterface $logger = null)  {
+  public function __construct(?LoggerInterface $logger = null) {
     $this->_logger = $logger ?? new NullLogger();
     $this->_configureSessionCookie();
 
-    if (session_status() === PHP_SESSION_NONE) {
-      if (!session_start()) {
+    if (\session_status() === PHP_SESSION_NONE) {
+      if (!\session_start()) {
         throw new SessionException('Failed to start session.');
       }
     }
@@ -69,19 +94,41 @@ final class Session {
     }
   }
 
+  // =========================================================================
+  // Authentication State
+  // =========================================================================
+
   /**
    * Checks if a user is currently logged in.
    */
-  public function isLoggedIn(): bool {
+  public function isLoggedIn():bool {
+    return $this->_logged_in;
+  }
+
+  /**
+   * Alias for isLoggedIn().
+   */
+  public function loggedIn():bool {
     return $this->_logged_in;
   }
 
   /**
    * Returns the internal database ID of the logged-in user, or null if guest.
    */
-  public function getUserId(): int|string|null {
+  public function getUserId():int|string|null {
     return $this->_id;
   }
+
+  /**
+   * Alias for getUserId() - returns user ID.
+   */
+  public function id():int|string|null {
+    return $this->_id;
+  }
+
+  // =========================================================================
+  // Login / Logout
+  // =========================================================================
 
   /**
    * Logs in a user.
@@ -97,7 +144,7 @@ final class Session {
     object $user,
     bool $remember = false,
     int $session_lifetime = 1800
-  ): bool {
+  ):bool {
     if (!\property_exists($user, 'id')) {
       self::_addError(
         'login',
@@ -137,8 +184,10 @@ final class Session {
       $group = $this->_normalizeAccessGroup($user->access_group ?? null);
       $rank = $this->_normalizeAccessRank($user->access_rank ?? null);
 
-      $this->access_group = $group;
-      $this->access_rank = $rank;
+      // Use reflection to set readonly properties
+      $this->_setReadonly('access_group', $group);
+      $this->_setReadonly('access_rank', $rank);
+
       $_SESSION['access_group'] = $group->value;
       $_SESSION['access_rank'] = $rank;
 
@@ -177,7 +226,7 @@ final class Session {
    *
    * @return bool True on success.
    */
-  public function logout(): bool {
+  public function logout():bool {
     if ($this->_logged_in) {
       $this->_logger->info('User logged out', ['user_id' => $this->_id]);
     }
@@ -209,17 +258,28 @@ final class Session {
     $this->name = 'GUEST_' . \time();
     $this->_expire = 0;
     $this->location = null;
-    $this->access_group = AccessGroup::GUEST;
-    $this->access_rank = AccessRank::GUEST->value;
+    $this->_setReadonly('access_group', AccessGroup::GUEST);
+    $this->_setReadonly('access_rank', AccessRank::GUEST->value);
 
     return true;
   }
 
+  // =========================================================================
+  // Session Expiry
+  // =========================================================================
+
   /**
    * Returns the session expiration timestamp.
    */
-  public function getExpiry(): int {
+  public function getExpiry():int {
     return $this->_expire;
+  }
+
+  /**
+   * Checks if session has expired.
+   */
+  public function isExpired():bool {
+    return $this->_expire > 0 && $this->_expire < \time();
   }
 
   /**
@@ -228,7 +288,7 @@ final class Session {
    * @param int $seconds Number of seconds from now.
    * @return bool True on success.
    */
-  public function extendExpiry(int $seconds): bool {
+  public function extendExpiry(int $seconds):bool {
     if ($seconds <= 0) {
       return false;
     }
@@ -237,14 +297,30 @@ final class Session {
     return true;
   }
 
+  // =========================================================================
+  // Location
+  // =========================================================================
+
   /**
    * Refreshes the user's location from server-side IP geolocation.
    *
-   * @return bool True on success, false on failure (errors in self::$_errors).
+   * @return bool True on success, false on failure.
    */
-  public function refreshLocation(): bool {
+  public function refreshLocation():bool {
+    if (!\class_exists('TimeFrontiers\Location')) {
+      self::_addError(
+        'location',
+        256,
+        'Location class not available. Install timefrontiers/php-location.',
+        __FILE__,
+        __LINE__,
+        AccessRank::DEVELOPER->value
+      );
+      return false;
+    }
+
     try {
-      $loc = new Location(); // Assumes server-side IP detection only
+      $loc = new Location();
       $this->location = (object)[
         'ip'              => $loc->ip,
         'city'            => $loc->city,
@@ -274,6 +350,10 @@ final class Session {
     }
   }
 
+  // =========================================================================
+  // CSRF Protection
+  // =========================================================================
+
   /**
    * Generates a CSRF token for a given form identifier.
    *
@@ -281,10 +361,7 @@ final class Session {
    * @param int $expiry_seconds Token lifetime in seconds (default 3600).
    * @return string The generated token to be embedded in the form.
    */
-  public function generateCSRFToken(
-    string $form_id,
-    int $expiry_seconds = 3600
-  ): string {
+  public function generateCSRFToken(string $form_id, int $expiry_seconds = 3600):string {
     $token = \bin2hex(\random_bytes(32));
     $_SESSION['csrf_tokens'][$form_id] = [
       'token'  => $token,
@@ -296,16 +373,13 @@ final class Session {
   /**
    * Validates a CSRF token for a given form identifier.
    *
-   * Tokens are one-time use; they are removed after validation (success or failure).
+   * Tokens are one-time use; they are removed after validation.
    *
    * @param string $form_id The form identifier.
    * @param string $token The token received from the request.
    * @return bool True if token is valid and not expired.
    */
-  public function validateCSRFToken(
-    string $form_id,
-    string $token
-  ): bool {
+  public function validateCSRFToken(string $form_id, string $token):bool {
     if (!isset($_SESSION['csrf_tokens'][$form_id])) {
       return false;
     }
@@ -321,48 +395,132 @@ final class Session {
   }
 
   /**
-   * Stores arbitrary data in the session.
+   * Generates a hidden input field with CSRF token.
    *
-   * @param string $key
-   * @param mixed $value
+   * @param string $form_id Form identifier.
+   * @param string $field_name Input field name (default: '_csrf_token').
+   * @return string HTML hidden input.
    */
-  public function set(string $key, mixed $value): void
-  {
+  public function csrfField(string $form_id, string $field_name = '_csrf_token'):string {
+    $token = $this->generateCSRFToken($form_id);
+    return '<input type="hidden" name="' . \htmlspecialchars($field_name) . '" value="' . \htmlspecialchars($token) . '">';
+  }
+
+  // =========================================================================
+  // Session Storage
+  // =========================================================================
+
+  /**
+   * Stores arbitrary data in the session.
+   */
+  public function set(string $key, mixed $value):void {
     $_SESSION[$key] = $value;
   }
 
   /**
    * Retrieves arbitrary data from the session.
-   *
-   * @param string $key
-   * @param mixed $default
-   * @return mixed
    */
-  public function get(string $key, mixed $default = null): mixed
-  {
+  public function get(string $key, mixed $default = null):mixed {
     return $_SESSION[$key] ?? $default;
+  }
+
+  /**
+   * Checks if a key exists in the session.
+   */
+  public function has(string $key):bool {
+    return isset($_SESSION[$key]);
   }
 
   /**
    * Removes a key from the session.
    */
-  public function remove(string $key): void
-  {
+  public function remove(string $key):void {
     unset($_SESSION[$key]);
   }
 
-  // -------------------------------------------------------------------------
-  // Backward Compatibility CSRF Methods (deprecated)
-  // -------------------------------------------------------------------------
+  /**
+   * Gets all session data.
+   */
+  public function all():array {
+    return $_SESSION;
+  }
+
+  // =========================================================================
+  // Flash Messages
+  // =========================================================================
+
+  /**
+   * Sets a flash message (available for one request).
+   */
+  public function flash(string $key, mixed $value):void {
+    $_SESSION['_flash'][$key] = $value;
+  }
+
+  /**
+   * Gets and removes a flash message.
+   */
+  public function getFlash(string $key, mixed $default = null):mixed {
+    $value = $_SESSION['_flash'][$key] ?? $default;
+    unset($_SESSION['_flash'][$key]);
+    return $value;
+  }
+
+  /**
+   * Checks if a flash message exists.
+   */
+  public function hasFlash(string $key):bool {
+    return isset($_SESSION['_flash'][$key]);
+  }
+
+  // =========================================================================
+  // Access Control Helpers
+  // =========================================================================
+
+  /**
+   * Checks if user has at least the given rank.
+   */
+  public function hasRank(AccessRank|int $rank):bool {
+    $required = $rank instanceof AccessRank ? $rank->value : $rank;
+    return $this->access_rank >= $required;
+  }
+
+  /**
+   * Checks if user is in the given group.
+   */
+  public function inGroup(AccessGroup|string $group):bool {
+    $check = $group instanceof AccessGroup ? $group : AccessGroup::tryFrom($group);
+    return $check !== null && $this->access_group === $check;
+  }
+
+  /**
+   * Checks if user is at least a staff member.
+   */
+  public function isStaff():bool {
+    return $this->access_rank >= AccessRank::MODERATOR->value;
+  }
+
+  /**
+   * Checks if user is technical (developer or higher).
+   */
+  public function isTechnical():bool {
+    return $this->access_rank >= AccessRank::DEVELOPER->value;
+  }
+
+  /**
+   * Checks if user is an admin.
+   */
+  public function isAdmin():bool {
+    return $this->access_rank >= AccessRank::ADMIN->value;
+  }
+
+  // =========================================================================
+  // Backward Compatibility (deprecated)
+  // =========================================================================
 
   /**
    * @deprecated Use generateCSRFToken() instead.
-   * @param string $form
-   * @param int $expiry Timestamp when token expires (0 for default).
-   * @return string
    */
-  public function createCSRFtoken(string $form, int $expiry = 0): string
-  {
+  public function createCSRFtoken(string $form, int $expiry = 0):string {
     $seconds = 2700; // 45 min default from original
     if ($expiry > \time()) {
       $seconds = $expiry - \time();
@@ -374,23 +532,14 @@ final class Session {
 
   /**
    * @deprecated Use validateCSRFToken() instead.
-   * @param string $form
-   * @param string $token
-   * @param int $token_exp Timestamp to check against (0 = current time).
-   * @return bool
    */
-  public function isValidCSRFtoken(
-    string $form,
-    string $token,
-    int $token_exp = 0
-  ): bool {
-    // In original, token_exp default 0 would be replaced with time()
+  public function isValidCSRFtoken(string $form, string $token, int $token_exp = 0):bool {
     return $this->validateCSRFToken($form, $token);
   }
 
-  // -------------------------------------------------------------------------
+  // =========================================================================
   // Static Error Handling
-  // -------------------------------------------------------------------------
+  // =========================================================================
 
   /**
    * Adds an error to the static collection.
@@ -398,8 +547,8 @@ final class Session {
    * @param string $context Error context (e.g., method name).
    * @param int $code Error code.
    * @param string $message Error message.
-   * @param string $file File where error occurred (use __FILE__).
-   * @param int $line Line number (use __LINE__).
+   * @param string $file File where error occurred.
+   * @param int $line Line number.
    * @param int $min_rank Minimum AccessRank value required to view this error.
    */
   protected static function _addError(
@@ -409,7 +558,7 @@ final class Session {
     string $file,
     int $line,
     int $min_rank = 0
-  ): void {
+  ):void {
     self::$_errors[$context][] = [
       $min_rank,
       $code,
@@ -418,26 +567,36 @@ final class Session {
       $line,
     ];
   }
-  public function getErrors(): array  {
-    return $this->_errors;
+
+  /**
+   * Returns all static errors.
+   */
+  public function getErrors():array {
+    return self::$_errors;
   }
+
+  /**
+   * Checks if any errors exist.
+   */
+  public function hasErrors():bool {
+    return !empty(self::$_errors);
+  }
+
   /**
    * Clears all static errors.
    */
-  public static function clearErrors(): void
-  {
+  public static function clearErrors():void {
     self::$_errors = [];
   }
 
-  // -------------------------------------------------------------------------
+  // =========================================================================
   // Private Helpers
-  // -------------------------------------------------------------------------
+  // =========================================================================
 
   /**
    * Configures secure session cookie parameters.
    */
-  private function _configureSessionCookie(): void
-  {
+  private function _configureSessionCookie():void {
     $params = \session_get_cookie_params();
     \session_set_cookie_params([
       'lifetime' => $params['lifetime'],
@@ -452,8 +611,7 @@ final class Session {
   /**
    * Checks if a valid session exists and restores state.
    */
-  private function _checkLogin(): void
-  {
+  private function _checkLogin():void {
     if (
       isset($_SESSION['user_id'], $_SESSION['_expire']) &&
       $_SESSION['_expire'] > \time()
@@ -462,12 +620,15 @@ final class Session {
       $this->_id = $_SESSION['user_id'];
       $this->name = $_SESSION['user_name'] ?? '';
 
-      $this->access_group = isset($_SESSION['access_group'])
+      $group = isset($_SESSION['access_group'])
         ? $this->_normalizeAccessGroup($_SESSION['access_group'])
         : AccessGroup::USER;
-      $this->access_rank = isset($_SESSION['access_rank'])
+      $rank = isset($_SESSION['access_rank'])
         ? \max(0, (int)$_SESSION['access_rank'])
         : AccessRank::USER->value;
+
+      $this->_setReadonly('access_group', $group);
+      $this->_setReadonly('access_rank', $rank);
 
       $this->_expire = (int)$_SESSION['_expire'];
       $this->location = $_SESSION['location'] ?? null;
@@ -479,8 +640,7 @@ final class Session {
   /**
    * Clears authentication-related session data.
    */
-  private function _clearSession(): void
-  {
+  private function _clearSession():void {
     unset(
       $_SESSION['user_id'],
       $_SESSION['user_name'],
@@ -495,13 +655,17 @@ final class Session {
   }
 
   /**
-   * Normalizes input to an AccessGroup enum.
-   *
-   * @param mixed $group AccessGroup instance or string.
-   * @return AccessGroup
+   * Sets a readonly property using reflection.
    */
-  private function _normalizeAccessGroup(mixed $group): AccessGroup
-  {
+  private function _setReadonly(string $property, mixed $value):void {
+    $ref = new \ReflectionProperty($this, $property);
+    $ref->setValue($this, $value);
+  }
+
+  /**
+   * Normalizes input to an AccessGroup enum.
+   */
+  private function _normalizeAccessGroup(mixed $group):AccessGroup {
     if ($group instanceof AccessGroup) {
       return $group;
     }
@@ -513,12 +677,8 @@ final class Session {
 
   /**
    * Normalizes input to an integer access rank.
-   *
-   * @param mixed $rank AccessRank instance or int.
-   * @return int
    */
-  private function _normalizeAccessRank(mixed $rank): int
-  {
+  private function _normalizeAccessRank(mixed $rank):int {
     if ($rank instanceof AccessRank) {
       return $rank->value;
     }
@@ -531,15 +691,10 @@ final class Session {
 
   /**
    * Sets a secure "remember me" cookie.
-   *
-   * In a full implementation, store a token hash in the database.
-   *
-   * @param int|string $user_id
    */
-  private function _setRememberMeCookie(int|string $user_id): void
-  {
+  private function _setRememberMeCookie(int|string $user_id):void {
     $token = \bin2hex(\random_bytes(32));
-    // Here you would store hash of $token with $user_id and expiry in database.
+    // TODO: Store hash of $token with $user_id and expiry in database.
 
     $value = $user_id . ':' . $token;
     \setcookie('remember_me', $value, [
@@ -554,8 +709,7 @@ final class Session {
   /**
    * Clears the "remember me" cookie.
    */
-  private function _clearRememberMeCookie(): void
-  {
+  private function _clearRememberMeCookie():void {
     \setcookie('remember_me', '', \time() - 3600, '/', '', true, true);
   }
 }
