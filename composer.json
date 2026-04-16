@@ -22,7 +22,7 @@
   "require": {
     "php": ">=8.1",
     "psr/log": "^3.0",
-    "timefrontiers/php-location": "^1.0",
+    "timefrontiers/php-core": "^1.0",
     "timefrontiers/php-instance-error": "^1.0"
   },
   "require-dev": {
@@ -31,7 +31,7 @@
   },
   "suggest": {
     "ext-redis": "For Redis session storage",
-    "symfony/http-foundation": "For better request/response handling"
+    "timefrontiers/php-location": "For IP geolocation support"
   },
   "autoload": {
     "psr-4": {
