@@ -358,17 +358,17 @@ final class Session {
     try {
       $loc = new Location();
       $this->_location = (object)[
-        'ip'              => $loc->ip,
-        'city'            => $loc->city,
-        'city_code'       => $loc->city_code,
-        'state'           => $loc->state,
-        'state_code'      => $loc->state_code,
-        'country'         => $loc->country,
-        'country_code'    => $loc->country_code,
-        'currency_code'   => $loc->currency_code,
-        'currency_symbol' => $loc->currency_symbol,
-        'latitude'        => $loc->latitude,
-        'longitude'       => $loc->longitude,
+        'ip'              => $loc->ip              ?? null,
+        'city'            => $loc->city            ?? null,
+        'city_code'       => $loc->city_code       ?? null,
+        'state'           => $loc->state           ?? null,
+        'state_code'      => $loc->state_code      ?? null,
+        'country'         => $loc->country         ?? null,
+        'country_code'    => $loc->country_code    ?? null,
+        'currency_code'   => $loc->currency_code   ?? null,
+        'currency_symbol' => $loc->currency_symbol ?? null,
+        'latitude'        => $loc->latitude        ?? null,
+        'longitude'       => $loc->longitude       ?? null,
       ];
       $_SESSION['location'] = $this->_location;
       return true;
