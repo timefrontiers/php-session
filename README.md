@@ -33,9 +33,18 @@ if (!$session->isLoggedIn()) {
 }
 
 // Access user info
-echo $session->name;           // "john.doe"
-echo $session->access_rank;    // 4 (MODERATOR)
-echo $session->access_group;   // AccessGroup::MODERATOR
+echo $session->id();           // e.g. 1
+echo $session->name();         // uniqueid e.g. "01234567890"
+echo $session->access_rank();  // 4 (MODERATOR)
+echo $session->access_group(); // AccessGroup::MODERATOR
+
+// Full user object
+$user = $session->user();
+echo $user->surname;
+
+// Geolocation
+$loc = $session->location();
+echo $loc?->country;
 ```
 
 ## Authentication
@@ -43,23 +52,24 @@ echo $session->access_group;   // AccessGroup::MODERATOR
 ### Login
 
 ```php
-// User object from your database
+// User object from your database — must have 'id' and 'uniqueid'
 $user = (object)[
   'id'           => 123,
-  'name'         => 'john.doe',
+  'uniqueid'     => '01234567890',
+  'name'         => 'John',
+  'surname'      => 'Doe',
   'access_group' => AccessGroup::MODERATOR,
   'access_rank'  => AccessRank::MODERATOR,
 ];
 
-// Login with 30-minute session
+// Login with 30-minute session (default)
 $session->login($user);
-
-// Login with "remember me" cookie
-$session->login($user, remember: true);
 
 // Custom session lifetime (2 hours)
 $session->login($user, session_lifetime: 7200);
 ```
+
+> **Note:** "Remember me" / persistent login requires storing a token in your database and is intentionally left to the application layer.
 
 ### Logout
 
@@ -72,7 +82,8 @@ $session->logout();
 ```php
 if ($session->isLoggedIn()) {
   $userId = $session->getUserId();  // or $session->id()
-  $name = $session->name;
+  $name   = $session->name();       // uniqueid of logged-in user
+  $user   = $session->user();       // full user object
 }
 ```
 
@@ -96,8 +107,8 @@ if ($session->isStaff()) { }     // MODERATOR or higher
 if ($session->isTechnical()) { } // DEVELOPER or higher
 if ($session->isAdmin()) { }     // ADMIN or higher
 
-// Direct access
-if ($session->access_rank >= AccessRank::DEVELOPER->value) {
+// Via getters
+if ($session->access_rank() >= AccessRank::DEVELOPER->value) {
   // Show debug info
 }
 ```
@@ -133,24 +144,26 @@ if (!$session->validateCSRFToken('contact_form', $_POST['_csrf_token'])) {
 }
 ```
 
-Tokens are single-use and automatically expire (default: 1 hour).
+Tokens are single-use and automatically expire (default: 1 hour). Expired tokens from other forms are pruned automatically on each `generateCSRFToken()` call.
 
-## Session Storage
+## User Object Storage
+
+`set()`, `get()`, `has()`, and `remove()` operate on the authenticated user object and are persisted to the session. Use these to attach extra data to the user mid-session.
 
 ```php
-// Store data
-$session->set('cart', ['item1', 'item2']);
+// Store data on the user object
+$session->set('theme', 'dark');
 
-// Retrieve data
-$cart = $session->get('cart', []);  // Default: []
+// Retrieve
+$theme = $session->get('theme', 'light');  // Default: 'light'
 
 // Check existence
-if ($session->has('cart')) { }
+if ($session->has('theme')) { }
 
 // Remove
-$session->remove('cart');
+$session->remove('theme');
 
-// Get all session data
+// Get all user object properties as array
 $all = $session->all();
 ```
 
@@ -194,11 +207,12 @@ Requires `timefrontiers/php-location`:
 $session->refreshLocation();
 
 // Access location data
-if ($session->location) {
-  echo $session->location->country;      // "United States"
-  echo $session->location->country_code; // "US"
-  echo $session->location->city;         // "San Francisco"
-  echo $session->location->currency_code;// "USD"
+$loc = $session->location();
+if ($loc) {
+  echo $loc->country;       // "United States"
+  echo $loc->country_code;  // "US"
+  echo $loc->city;          // "San Francisco"
+  echo $loc->currency_code; // "USD"
 }
 ```
 
@@ -228,7 +242,7 @@ $session->login($invalidUser);
 if ($session->hasErrors()) {
   $extractor = new InstanceError($session);
   $errors = $extractor->get('login');
-  
+
   foreach ($errors as $err) {
     echo $err[2]; // Error message
   }
@@ -243,8 +257,9 @@ Session::clearErrors();
 - Session ID regeneration on login (prevents fixation)
 - Secure cookies (HTTPOnly, SameSite=Lax)
 - HTTPS-only cookies when available
-- Timing-safe token comparison (hash_equals)
-- Single-use CSRF tokens
+- Timing-safe CSRF token comparison (`hash_equals`)
+- Single-use CSRF tokens with automatic expiry pruning
+- No session ID regeneration on every request (prevents concurrency issues)
 
 ## Dependencies
 

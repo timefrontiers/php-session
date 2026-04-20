@@ -20,18 +20,28 @@ use Psr\Log\NullLogger;
  *
  * // Check login state
  * if (!$session->isLoggedIn()) {
- *   // Login user
- *   $session->login($user, remember: true);
+ *   $session->login($user);
  * }
  *
- * // Access control
- * if ($session->access_rank >= AccessRank::MODERATOR->value) {
+ * // Access id and name (uniqueid)
+ * echo $session->id();     // e.g. 1
+ * echo $session->name();   // e.g. 08790777767
+ *
+ * // Full user object
+ * $user = $session->user();
+ * echo $user->surname;
+ *
+ * // Access control via getters
+ * if ($session->access_rank() >= AccessRank::MODERATOR->value) {
  *   // Show admin panel
  * }
  *
+ * // Store/retrieve data on the user object
+ * $session->set('theme', 'dark');
+ * $theme = $session->get('theme');
+ *
  * // CSRF protection
  * $token = $session->generateCSRFToken('contact_form');
- * // In form handler:
  * if (!$session->validateCSRFToken('contact_form', $_POST['token'])) {
  *   die('Invalid token');
  * }
@@ -45,24 +55,29 @@ final class Session {
   private ?LoggerInterface $_logger;
 
   /**
-   * @var string Public unique identifier (e.g., username, public ID).
+   * @var string The user's public unique identifier (uniqueid).
    */
-  public string $name = '';
-
-  /**
-   * @var AccessGroup The user's access group.
-   */
-  public readonly AccessGroup $access_group;
-
-  /**
-   * @var int The user's access rank (value from AccessRank enum).
-   */
-  public readonly int $access_rank;
+  protected string $_name = '';
 
   /**
    * @var object|null The user's geolocation information.
    */
-  public ?object $location = null;
+  protected ?object $_location = null;
+
+  /**
+   * @var object|null The full authenticated user object.
+   */
+  protected ?object $_user = null;
+
+  /**
+   * @var AccessGroup The user's access group.
+   */
+  protected AccessGroup $_access_group;
+
+  /**
+   * @var int The user's access rank (value from AccessRank enum).
+   */
+  protected int $_access_rank;
 
   /**
    * @var array Static error collection.
@@ -88,9 +103,9 @@ final class Session {
 
     // Set defaults for guest users
     if (!$this->_logged_in) {
-      $this->access_group = AccessGroup::GUEST;
-      $this->access_rank = AccessRank::GUEST->value;
-      $this->name = 'GUEST_' . \time();
+      $this->_access_group = AccessGroup::GUEST;
+      $this->_access_rank  = AccessRank::GUEST->value;
+      $this->_name         = 'GUEST_' . \time();
     }
   }
 
@@ -127,24 +142,60 @@ final class Session {
   }
 
   // =========================================================================
+  // Getters
+  // =========================================================================
+
+  /**
+   * Returns the user's public unique identifier (uniqueid).
+   */
+  public function name():string {
+    return $this->_name;
+  }
+
+  /**
+   * Returns the full user object, or null if not logged in.
+   */
+  public function user():?object {
+    return $this->_user;
+  }
+
+  /**
+   * Returns the user's geolocation information, or null if unavailable.
+   */
+  public function location():?object {
+    return $this->_location;
+  }
+
+  /**
+   * Returns the user's access group.
+   */
+  public function access_group():AccessGroup {
+    return $this->_access_group;
+  }
+
+  /**
+   * Returns the user's access rank value.
+   */
+  public function access_rank():int {
+    return $this->_access_rank;
+  }
+
+  // =========================================================================
   // Login / Logout
   // =========================================================================
 
   /**
    * Logs in a user.
    *
-   * @param object $user User object with at least 'id' and a public identifier
-   *                     ('name' or 'uniqueid'). May also contain 'access_group'
-   *                     and 'access_rank'.
-   * @param bool $remember If true, sets a long-lived "remember me" cookie.
+   * @param object $user User object with at least 'id' and 'uniqueid'. May also
+   *                     contain 'access_group' and 'access_rank'.
    * @param int $session_lifetime Session lifetime in seconds (default 30 minutes).
    * @return bool True on success, false on failure (errors in self::$_errors).
    */
-  public function login(
-    object $user,
-    bool $remember = false,
-    int $session_lifetime = 1800
-  ):bool {
+  public function login(object $user, int $session_lifetime = 1800):bool {
+    // Clear any errors from a previous login attempt
+    unset(self::$_errors['login']);
+
     if (!\property_exists($user, 'id')) {
       self::_addError(
         'login',
@@ -157,13 +208,11 @@ final class Session {
       return false;
     }
 
-    // Determine public name
-    $public_name = $user->name ?? $user->uniqueid ?? null;
-    if ($public_name === null) {
+    if (!\property_exists($user, 'uniqueid') || $user->uniqueid === null) {
       self::_addError(
         'login',
         256,
-        'User object must have a public identifier ("name" or "uniqueid").',
+        'User object must have a "uniqueid" property.',
         __FILE__,
         __LINE__,
         AccessRank::DEVELOPER->value
@@ -175,33 +224,29 @@ final class Session {
       // Regenerate session ID to prevent fixation
       \session_regenerate_id(true);
 
-      $this->_id = $user->id;
-      $this->name = (string)$public_name;
-      $_SESSION['user_id'] = $this->_id;
-      $_SESSION['user_name'] = $this->name;
+      // Store the full user object
+      $this->_user      = $user;
+      $_SESSION['user'] = $user;
+
+      $this->_id        = $user->id;
+      $this->_name      = (string)$user->uniqueid;
+      $_SESSION['name'] = $this->_name;
 
       // Set access group and rank
       $group = $this->_normalizeAccessGroup($user->access_group ?? null);
-      $rank = $this->_normalizeAccessRank($user->access_rank ?? null);
+      $rank  = $this->_normalizeAccessRank($user->access_rank ?? null);
 
-      // Use reflection to set readonly properties
-      $this->_setReadonly('access_group', $group);
-      $this->_setReadonly('access_rank', $rank);
-
+      $this->_access_group      = $group;
+      $this->_access_rank       = $rank;
       $_SESSION['access_group'] = $group->value;
-      $_SESSION['access_rank'] = $rank;
+      $_SESSION['access_rank']  = $rank;
 
       // Set expiration
-      $this->_expire = \time() + $session_lifetime;
+      $this->_expire       = \time() + $session_lifetime;
       $_SESSION['_expire'] = $this->_expire;
 
       // Refresh location data
       $this->refreshLocation();
-
-      // Handle "remember me" functionality
-      if ($remember) {
-        $this->_setRememberMeCookie($this->_id);
-      }
 
       $this->_logged_in = true;
       $this->_logger->info('User logged in', ['user_id' => $this->_id]);
@@ -233,33 +278,31 @@ final class Session {
 
     // Clear session data
     $_SESSION = [];
-    $this->_clearRememberMeCookie();
 
-    // Destroy session cookie
+    // Expire the session cookie
     if (\ini_get('session.use_cookies')) {
       $params = \session_get_cookie_params();
-      \setcookie(
-        \session_name(),
-        '',
-        \time() - 42000,
-        $params['path'],
-        $params['domain'],
-        $params['secure'],
-        $params['httponly']
-      );
+      \setcookie(\session_name(), '', [
+        'expires'  => \time() - 42000,
+        'path'     => $params['path'],
+        'domain'   => $params['domain'],
+        'secure'   => $params['secure'],
+        'httponly' => $params['httponly'],
+        'samesite' => 'Lax',
+      ]);
     }
 
     \session_destroy();
-    \session_regenerate_id(true);
 
     // Reset properties
-    $this->_logged_in = false;
-    $this->_id = null;
-    $this->name = 'GUEST_' . \time();
-    $this->_expire = 0;
-    $this->location = null;
-    $this->_setReadonly('access_group', AccessGroup::GUEST);
-    $this->_setReadonly('access_rank', AccessRank::GUEST->value);
+    $this->_logged_in    = false;
+    $this->_id           = null;
+    $this->_name         = 'GUEST_' . \time();
+    $this->_expire       = 0;
+    $this->_location     = null;
+    $this->_user         = null;
+    $this->_access_group = AccessGroup::GUEST;
+    $this->_access_rank  = AccessRank::GUEST->value;
 
     return true;
   }
@@ -292,7 +335,7 @@ final class Session {
     if ($seconds <= 0) {
       return false;
     }
-    $this->_expire = \time() + $seconds;
+    $this->_expire       = \time() + $seconds;
     $_SESSION['_expire'] = $this->_expire;
     return true;
   }
@@ -321,7 +364,7 @@ final class Session {
 
     try {
       $loc = new Location();
-      $this->location = (object)[
+      $this->_location = (object)[
         'ip'              => $loc->ip,
         'city'            => $loc->city,
         'city_code'       => $loc->city_code,
@@ -334,7 +377,7 @@ final class Session {
         'latitude'        => $loc->latitude,
         'longitude'       => $loc->longitude,
       ];
-      $_SESSION['location'] = $this->location;
+      $_SESSION['location'] = $this->_location;
       return true;
     } catch (\Throwable $e) {
       self::_addError(
@@ -357,11 +400,23 @@ final class Session {
   /**
    * Generates a CSRF token for a given form identifier.
    *
+   * Expired tokens for other forms are pruned on each call.
+   *
    * @param string $form_id Unique identifier for the form/action.
    * @param int $expiry_seconds Token lifetime in seconds (default 3600).
    * @return string The generated token to be embedded in the form.
    */
   public function generateCSRFToken(string $form_id, int $expiry_seconds = 3600):string {
+    // Prune expired tokens to prevent session bloat
+    if (!empty($_SESSION['csrf_tokens'])) {
+      $now = \time();
+      foreach ($_SESSION['csrf_tokens'] as $id => $data) {
+        if ($data['expire'] < $now) {
+          unset($_SESSION['csrf_tokens'][$id]);
+        }
+      }
+    }
+
     $token = \bin2hex(\random_bytes(32));
     $_SESSION['csrf_tokens'][$form_id] = [
       'token'  => $token,
@@ -407,42 +462,49 @@ final class Session {
   }
 
   // =========================================================================
-  // Session Storage
+  // User Object Storage
   // =========================================================================
 
   /**
-   * Stores arbitrary data in the session.
+   * Sets a property on the user object (and syncs to session).
    */
   public function set(string $key, mixed $value):void {
-    $_SESSION[$key] = $value;
+    if ($this->_user === null) {
+      $this->_user = new \stdClass();
+    }
+    $this->_user->$key = $value;
+    $_SESSION['user']  = $this->_user;
   }
 
   /**
-   * Retrieves arbitrary data from the session.
+   * Retrieves a property from the user object.
    */
   public function get(string $key, mixed $default = null):mixed {
-    return $_SESSION[$key] ?? $default;
+    return $this->_user->$key ?? $default;
   }
 
   /**
-   * Checks if a key exists in the session.
+   * Checks if a property exists on the user object.
    */
   public function has(string $key):bool {
-    return isset($_SESSION[$key]);
+    return isset($this->_user->$key);
   }
 
   /**
-   * Removes a key from the session.
+   * Removes a property from the user object (and syncs to session).
    */
   public function remove(string $key):void {
-    unset($_SESSION[$key]);
+    if ($this->_user !== null) {
+      unset($this->_user->$key);
+      $_SESSION['user'] = $this->_user;
+    }
   }
 
   /**
-   * Gets all session data.
+   * Returns all properties on the user object as an array.
    */
   public function all():array {
-    return $_SESSION;
+    return $this->_user !== null ? (array)$this->_user : [];
   }
 
   // =========================================================================
@@ -481,7 +543,7 @@ final class Session {
    */
   public function hasRank(AccessRank|int $rank):bool {
     $required = $rank instanceof AccessRank ? $rank->value : $rank;
-    return $this->access_rank >= $required;
+    return $this->_access_rank >= $required;
   }
 
   /**
@@ -489,28 +551,28 @@ final class Session {
    */
   public function inGroup(AccessGroup|string $group):bool {
     $check = $group instanceof AccessGroup ? $group : AccessGroup::tryFrom($group);
-    return $check !== null && $this->access_group === $check;
+    return $check !== null && $this->_access_group === $check;
   }
 
   /**
    * Checks if user is at least a staff member.
    */
   public function isStaff():bool {
-    return $this->access_rank >= AccessRank::MODERATOR->value;
+    return $this->_access_rank >= AccessRank::MODERATOR->value;
   }
 
   /**
    * Checks if user is technical (developer or higher).
    */
   public function isTechnical():bool {
-    return $this->access_rank >= AccessRank::DEVELOPER->value;
+    return $this->_access_rank >= AccessRank::DEVELOPER->value;
   }
 
   /**
    * Checks if user is an admin.
    */
   public function isAdmin():bool {
-    return $this->access_rank >= AccessRank::ADMIN->value;
+    return $this->_access_rank >= AccessRank::ADMIN->value;
   }
 
   // =========================================================================
@@ -613,25 +675,27 @@ final class Session {
    */
   private function _checkLogin():void {
     if (
-      isset($_SESSION['user_id'], $_SESSION['_expire']) &&
-      $_SESSION['_expire'] > \time()
+      isset($_SESSION['user'], $_SESSION['_expire']) &&
+      \is_object($_SESSION['user']) &&
+      (int)$_SESSION['_expire'] > \time()
     ) {
-      $this->_logged_in = true;
-      $this->_id = $_SESSION['user_id'];
-      $this->name = $_SESSION['user_name'] ?? '';
+      $this->_user  = $_SESSION['user'];
+      $this->_id    = $this->_user->id ?? null;
+      $this->_name  = $_SESSION['name'] ?? '';
 
-      $group = isset($_SESSION['access_group'])
+      $this->_access_group = isset($_SESSION['access_group'])
         ? $this->_normalizeAccessGroup($_SESSION['access_group'])
         : AccessGroup::USER;
-      $rank = isset($_SESSION['access_rank'])
+      $this->_access_rank = isset($_SESSION['access_rank'])
         ? \max(0, (int)$_SESSION['access_rank'])
         : AccessRank::USER->value;
 
-      $this->_setReadonly('access_group', $group);
-      $this->_setReadonly('access_rank', $rank);
+      $this->_expire   = (int)$_SESSION['_expire'];
+      $this->_location = (!empty($_SESSION['location']) && \is_object($_SESSION['location']))
+        ? $_SESSION['location']
+        : null;
 
-      $this->_expire = (int)$_SESSION['_expire'];
-      $this->location = $_SESSION['location'] ?? null;
+      $this->_logged_in = true;
     } else {
       $this->_clearSession();
     }
@@ -642,24 +706,17 @@ final class Session {
    */
   private function _clearSession():void {
     unset(
-      $_SESSION['user_id'],
-      $_SESSION['user_name'],
+      $_SESSION['user'],
+      $_SESSION['name'],
       $_SESSION['_expire'],
       $_SESSION['access_group'],
       $_SESSION['access_rank'],
       $_SESSION['location']
     );
     $this->_logged_in = false;
-    $this->_id = null;
-    $this->_expire = 0;
-  }
-
-  /**
-   * Sets a readonly property using reflection.
-   */
-  private function _setReadonly(string $property, mixed $value):void {
-    $ref = new \ReflectionProperty($this, $property);
-    $ref->setValue($this, $value);
+    $this->_user      = null;
+    $this->_id        = null;
+    $this->_expire    = 0;
   }
 
   /**
@@ -677,39 +734,16 @@ final class Session {
 
   /**
    * Normalizes input to an integer access rank.
+   * Handles AccessRank enum, int, and numeric strings (e.g. from database).
    */
   private function _normalizeAccessRank(mixed $rank):int {
     if ($rank instanceof AccessRank) {
       return $rank->value;
     }
-    if (\is_int($rank)) {
-      $enum = AccessRank::tryFrom($rank);
+    if (\is_int($rank) || (\is_string($rank) && \is_numeric($rank))) {
+      $enum = AccessRank::tryFrom((int)$rank);
       return $enum ? $enum->value : AccessRank::USER->value;
     }
     return AccessRank::USER->value;
-  }
-
-  /**
-   * Sets a secure "remember me" cookie.
-   */
-  private function _setRememberMeCookie(int|string $user_id):void {
-    $token = \bin2hex(\random_bytes(32));
-    // TODO: Store hash of $token with $user_id and expiry in database.
-
-    $value = $user_id . ':' . $token;
-    \setcookie('remember_me', $value, [
-      'expires'  => \time() + 86400 * 30, // 30 days
-      'path'     => '/',
-      'secure'   => true,
-      'httponly' => true,
-      'samesite' => 'Lax',
-    ]);
-  }
-
-  /**
-   * Clears the "remember me" cookie.
-   */
-  private function _clearRememberMeCookie():void {
-    \setcookie('remember_me', '', \time() - 3600, '/', '', true, true);
   }
 }
