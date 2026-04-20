@@ -24,8 +24,8 @@ use Psr\Log\NullLogger;
  * }
  *
  * // Access id and name (uniqueid)
- * echo $session->id();     // e.g. 1
- * echo $session->name();   // e.g. 08790777767
+ * echo $session->id();   // e.g. 1
+ * echo $session->name;   // e.g. 01234567890
  *
  * // Full user object
  * $user = $session->user();
@@ -57,7 +57,7 @@ final class Session {
   /**
    * @var string The user's public unique identifier (uniqueid).
    */
-  protected string $_name = '';
+  public string $name = '';
 
   /**
    * @var object|null The user's geolocation information.
@@ -105,7 +105,7 @@ final class Session {
     if (!$this->_logged_in) {
       $this->_access_group = AccessGroup::GUEST;
       $this->_access_rank  = AccessRank::GUEST->value;
-      $this->_name         = 'GUEST_' . \time();
+      $this->name         = 'GUEST_' . \time();
     }
   }
 
@@ -144,13 +144,6 @@ final class Session {
   // =========================================================================
   // Getters
   // =========================================================================
-
-  /**
-   * Returns the user's public unique identifier (uniqueid).
-   */
-  public function name():string {
-    return $this->_name;
-  }
 
   /**
    * Returns the full user object, or null if not logged in.
@@ -229,8 +222,8 @@ final class Session {
       $_SESSION['user'] = $user;
 
       $this->_id        = $user->id;
-      $this->_name      = (string)$user->uniqueid;
-      $_SESSION['name'] = $this->_name;
+      $this->name      = (string)$user->uniqueid;
+      $_SESSION['name'] = $this->name;
 
       // Set access group and rank
       $group = $this->_normalizeAccessGroup($user->access_group ?? null);
@@ -297,7 +290,7 @@ final class Session {
     // Reset properties
     $this->_logged_in    = false;
     $this->_id           = null;
-    $this->_name         = 'GUEST_' . \time();
+    $this->name         = 'GUEST_' . \time();
     $this->_expire       = 0;
     $this->_location     = null;
     $this->_user         = null;
@@ -681,7 +674,7 @@ final class Session {
     ) {
       $this->_user  = $_SESSION['user'];
       $this->_id    = $this->_user->id ?? null;
-      $this->_name  = $_SESSION['name'] ?? '';
+      $this->name  = $_SESSION['name'] ?? '';
 
       $this->_access_group = isset($_SESSION['access_group'])
         ? $this->_normalizeAccessGroup($_SESSION['access_group'])

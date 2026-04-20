@@ -34,7 +34,7 @@ if (!$session->isLoggedIn()) {
 
 // Access user info
 echo $session->id();           // e.g. 1
-echo $session->name();         // uniqueid e.g. "01234567890"
+echo $session->name;           // uniqueid e.g. "01234567890"
 echo $session->access_rank();  // 4 (MODERATOR)
 echo $session->access_group(); // AccessGroup::MODERATOR
 
@@ -82,7 +82,7 @@ $session->logout();
 ```php
 if ($session->isLoggedIn()) {
   $userId = $session->getUserId();  // or $session->id()
-  $name   = $session->name();       // uniqueid of logged-in user
+  $name   = $session->name;          // uniqueid of logged-in user
   $user   = $session->user();       // full user object
 }
 ```
