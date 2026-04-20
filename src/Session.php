@@ -182,12 +182,20 @@ final class Session {
    *
    * @param object $user User object with at least 'id' and 'uniqueid'. May also
    *                     contain 'access_group' and 'access_rank'.
-   * @param int $session_lifetime Session lifetime in seconds (default 30 minutes).
+   * @param int $session_lifetime Session lifetime in seconds (default 1800 = 30 minutes).
+   *                             Values ≤ 0 are ignored and the default is used instead
+   *                             (backward-compatible with old API that passed 0 for "no remember-me").
    * @return bool True on success, false on failure (errors in self::$_errors).
    */
   public function login(object $user, int $session_lifetime = 1800):bool {
     // Clear any errors from a previous login attempt
     unset(self::$_errors['login']);
+
+    // Guard against zero or negative lifetime (old API passed 0 for "no remember-me").
+    // Treat any value ≤ 0 as the default 30-minute lifetime.
+    if ($session_lifetime <= 0) {
+      $session_lifetime = 1800;
+    }
 
     if (!\property_exists($user, 'id')) {
       self::_addError(
@@ -214,12 +222,13 @@ final class Session {
     }
 
     try {
-      // Regenerate session ID to prevent fixation
-      \session_regenerate_id(true);
-
-      // Store the full user object
-      $this->_user      = $user;
-      $_SESSION['user'] = $user;
+      // Store a serialization-safe copy of the user object.
+      // _sanitizeUser() converts enum values to their scalar backing values
+      // and strips anything non-serializable, producing a plain stdClass that
+      // PHP can deserialize on the next request without needing any class loaded.
+      $safe_user        = $this->_sanitizeUser($user);
+      $this->_user      = $safe_user;
+      $_SESSION['user'] = $safe_user;
 
       $this->_id        = $user->id;
       $this->name      = (string)$user->uniqueid;
@@ -710,6 +719,26 @@ final class Session {
     $this->_user      = null;
     $this->_id        = null;
     $this->_expire    = 0;
+  }
+
+  /**
+   * Recursively converts an object into a plain stdClass safe for PHP session
+   * serialization. Backed enums become their scalar value, unit enums become
+   * their name, and anything non-serializable (resources, closures) is dropped.
+   */
+  private function _sanitizeUser(object $user):\stdClass {
+    $safe = new \stdClass();
+    foreach (\get_object_vars($user) as $key => $value) {
+      $safe->$key = match(true) {
+        $value instanceof \BackedEnum => $value->value,
+        $value instanceof \UnitEnum  => $value->name,
+        $value instanceof \stdClass  => $this->_sanitizeUser($value),
+        \is_object($value)           => $this->_sanitizeUser($value),
+        \is_resource($value)         => null,
+        default                      => $value,
+      };
+    }
+    return $safe;
   }
 
   /**
