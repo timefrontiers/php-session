@@ -1,276 +1,291 @@
 # TimeFrontiers PHP Session
 
-Modern PHP session manager with authentication state, access control, CSRF protection, and geolocation.
+Secure PHP 8.5 session lifecycle, authenticated identity state, access groups,
+CSRF tokens, pull-flash values, bounded session attributes, and optional
+location enrichment.
+
+This package stores authentication established by a trusted authentication
+service. It does not verify passwords, parse bearer tokens, or decide whether
+arbitrary proxy headers are trustworthy.
 
 ## Installation
 
 ```bash
-composer require timefrontiers/php-session
+composer require timefrontiers/php-session:^1.1
 ```
 
-## Features
+## Secure bootstrap
 
-- Secure session handling with HTTPOnly, SameSite cookies
-- User authentication state management
-- Access rank/group based authorization
-- CSRF token generation and validation
-- Flash messages
-- IP geolocation integration
-- PSR-3 logger support
-
-## Quick Start
+Construct `Session` before output. Production configuration defaults to secure,
+HttpOnly cookies, SameSite Lax, strict mode, cookie-only IDs, a browser-session
+cookie, a 30-minute idle window, and a 24-hour absolute lifetime. The native
+handler GC lifetime is configured to cover the absolute authentication window.
 
 ```php
 use TimeFrontiers\Session;
-use TimeFrontiers\AccessRank;
+use TimeFrontiers\SessionConfig;
 
-// Start session
-$session = new Session();
+$config = new SessionConfig(
+  cookieName: 'LINKTUDESESSID',
+  externalRequestIsSecure: $externalRequestIsSecure,
+  cookieSecure: true,
+  cookieHttpOnly: true,
+  cookieSameSite: 'Lax',
+  cookiePath: '/',
+  cookieDomain: '.example.com',
+);
 
-// Check if logged in
-if (!$session->isLoggedIn()) {
-  // Show login form
-}
-
-// Access user info
-echo $session->id();           // e.g. 1
-echo $session->name;           // uniqueid e.g. "01234567890"
-echo $session->access_rank();  // 4 (MODERATOR)
-echo $session->access_group(); // AccessGroup::MODERATOR
-
-// Full user object
-$user = $session->user();
-echo $user->surname;
-
-// Geolocation
-$loc = $session->location();
-echo $loc?->country;
+$session = new Session($logger, $config);
 ```
 
-## Authentication
+`$externalRequestIsSecure` must be computed by the host after applying its
+trusted-proxy policy. Session never reads `Forwarded`, `X-Forwarded-*`, or
+`$_SERVER['HTTPS']` to grant cookie trust.
 
-### Login
+For loopback development over HTTP, opt in explicitly:
 
 ```php
-// User object from your database — must have 'id' and 'uniqueid'
-$user = (object)[
-  'id'           => 123,
-  'uniqueid'     => '01234567890',
-  'name'         => 'John',
-  'surname'      => 'Doe',
-  'access_group' => AccessGroup::MODERATOR,
-  'access_rank'  => AccessRank::MODERATOR,
+$session = new Session(
+  config: SessionConfig::insecureDevelopment('DEVSESSID')
+);
+```
+
+An already-active session is adopted only when its name, cookie attributes,
+strict mode, cookie-only mode, and trans-SID setting match the supplied
+configuration. Otherwise construction throws `SessionException`. Configure and
+start Session before sending headers.
+
+## Trusted login identity
+
+`login()` accepts an object with `id` and `uniqueid`. Never pass request JSON,
+form data, cookies, or unverified token claims directly.
+
+```php
+use TimeFrontiers\AccessGroup;
+use TimeFrontiers\AccessRank;
+
+$identity = (object)[
+  'id' => 42,
+  'uniqueid' => '01234567890',
+  'name' => 'Ada',
+  'surname' => 'Lovelace',
+  'country_code' => 'NG',
+  'avatar' => '/avatar/ada.png',
+  'auth_version' => 3,
+  'access_group' => AccessGroup::ADMIN,
+  'access_rank' => AccessRank::ADMIN,
 ];
 
-// Login with 30-minute session (default)
-$session->login($user);
-
-// Custom session lifetime (2 hours)
-$session->login($user, session_lifetime: 7200);
-```
-
-> **Note:** "Remember me" / persistent login requires storing a token in your database and is intentionally left to the application layer.
-
-### Logout
-
-```php
-$session->logout();
-```
-
-### Check Authentication
-
-```php
-if ($session->isLoggedIn()) {
-  $userId = $session->getUserId();  // or $session->id()
-  $name   = $session->name;          // uniqueid of logged-in user
-  $user   = $session->user();       // full user object
+if (!$session->login($identity, session_lifetime: 7200)) {
+  // The existing guest/authenticated state remains unchanged.
 }
 ```
 
-## Access Control
+Login validates the entire projection, rotates the ID with old-state deletion,
+and only then commits one versioned payload. A rotation failure cannot leave a
+partial login.
+
+CSRF tokens minted before authentication are discarded only after a successful
+ID rotation, so a guest token cannot cross into the authenticated privilege
+context. Bounded application attributes and pull-flash values intentionally
+survive login for compatibility (for example, a return URL or success notice).
+Strict mode and ID rotation prevent another client from planting that guest
+state.
+
+Group and rank rules are fail-closed:
+
+- if neither is supplied, the identity becomes `USER`;
+- if only one is supplied, the other is derived through `php-core`;
+- if both are supplied, they must agree;
+- guest, negative, unknown, or unsupported future values are rejected;
+- a value that is supplied but does not normalize is rejected outright. It is
+  never treated as absent, so an unusable `access_group` can never hand the
+  privilege decision to `access_rank`.
+
+The default stored identity contains `id`, `uniqueid`, canonical group/rank,
+`name`, `surname`, `country_code`, `avatar`, and `auth_version`. Other benign
+properties are not retained. Sensitive field names, closures, resources,
+unsupported objects, cycles, deep arrays, and oversized values reject login.
+
+`id`, `uniqueid`, group, and rank are credentials and are validated strictly.
+The optional display fields `name`, `surname`, `avatar`, and `country_code` are
+enrichment: a value that cannot be used is stored as `null` rather than denying
+authentication, so a blank surname or an empty country column never locks a
+valid identity out. Explicitly configured `identityFields` and `identityMapper`
+output remain strict.
+
+An application may explicitly map additional safe scalar identity fields:
 
 ```php
-use TimeFrontiers\AccessRank;
+$config = new SessionConfig(
+  identityMapper: static function (object $source, object $safe): array {
+    return ['tenant_code' => ((array) $source)['tenant_code']];
+  },
+);
+```
 
-// Check rank
-if ($session->hasRank(AccessRank::MODERATOR)) {
-  // Can moderate
+Mapper output remains subject to the same sensitive-name, field-count, string,
+and total-size limits.
+
+## Authentication and access
+
+```php
+if ($session->isLoggedIn()) { // loggedIn() is an alias
+  $id = $session->id();       // getUserId() is an alias
+  $code = $session->name;     // authenticated uniqueid
+  $user = $session->user();   // bounded stdClass projection
 }
 
-// Check group
-if ($session->inGroup(AccessGroup::ADMIN)) {
-  // Is admin
-}
+$group = $session->access_group(); // AccessGroup enum
+$rank = $session->access_rank();   // scalar rank
 
-// Convenience methods
-if ($session->isStaff()) { }     // MODERATOR or higher
-if ($session->isTechnical()) { } // DEVELOPER or higher
-if ($session->isAdmin()) { }     // ADMIN or higher
-
-// Via getters
-if ($session->access_rank() >= AccessRank::DEVELOPER->value) {
-  // Show debug info
-}
+if ($session->hasRank(AccessRank::MODERATOR)) {}
+if ($session->inGroup(AccessGroup::ADMIN)) {}
+if ($session->isStaff()) {}
+if ($session->isTechnical()) {}
+if ($session->isAdmin()) {}
 ```
 
-## CSRF Protection
+Guest names are random display labels prefixed with `GUEST_`. They are not
+security identifiers.
 
-### Generate Token
+## Expiry
+
+Authentication has an idle expiry and an absolute expiry. `getExpiry()` returns
+the earlier timestamp. Equality with the current time is expired.
 
 ```php
-// In your form
-$token = $session->generateCSRFToken('contact_form');
+$expiresAt = $session->getExpiry();
+$expired = $session->isExpired();
+$extended = $session->extendExpiry(1800);
 ```
 
-```html
-<form method="post">
-  <input type="hidden" name="_csrf_token" value="<?= $token ?>">
-  <!-- form fields -->
-</form>
-```
+Activity does not automatically slide the idle window in 1.1. Extension must be
+explicit, requires authentication, and cannot exceed the configured idle,
+extension, or absolute cap. Persistent cookies are reissued when applicable.
 
-Or use the helper:
+## Logout
 
 ```php
-echo $session->csrfField('contact_form');
-// Outputs: <input type="hidden" name="_csrf_token" value="...">
-```
-
-### Validate Token
-
-```php
-if (!$session->validateCSRFToken('contact_form', $_POST['_csrf_token'])) {
-  die('Invalid CSRF token');
+if (!$session->logout()) {
+  // Local state is guest, but cookie or handler cleanup was incomplete.
 }
 ```
 
-Tokens are single-use and automatically expire (default: 1 hour). Expired tokens from other forms are pruned automatically on each `generateCSRFToken()` call.
+Logout resets the local object regardless of external failures, deletes the
+cookie with the exact creation attributes, rotates/deletes the old identifier,
+checks `session_destroy()`, and reports incomplete cleanup as `false`.
 
-## User Object Storage
+## CSRF protection
 
-`set()`, `get()`, `has()`, and `remove()` operate on the authenticated user object and are persisted to the session. Use these to attach extra data to the user mid-session.
+Each form/action may hold several one-time tokens, so separate browser tabs do
+not invalidate each other.
 
 ```php
-// Store data on the user object
-$session->set('theme', 'dark');
+$token = $session->generateCSRFToken('profile-form', 1500);
 
-// Retrieve
-$theme = $session->get('theme', 'light');  // Default: 'light'
+if (!$session->validateCSRFToken('profile-form', $submittedToken)) {
+  // Wrong submissions do not consume other valid tokens.
+}
 
-// Check existence
-if ($session->has('theme')) { }
+echo $session->csrfField('profile-form', 'csrf_token');
+```
 
-// Remove
+Tokens are cryptographically random, stored as hashes, compared against every
+candidate in constant time, and consumed only after a successful match. Form
+IDs, TTL, tokens per form, and total tokens are bounded. Expired and malformed
+entries are pruned. A successful login invalidates every token minted before
+authentication; generate fresh tokens for authenticated forms.
+
+`createCSRFtoken()` and `isValidCSRFtoken()` remain callable for 1.x compatibility
+but emit `E_USER_DEPRECATED`.
+
+## Bounded attributes and flash
+
+```php
+$session->set('theme', ['mode' => 'dark']);
+$theme = $session->get('theme', ['mode' => 'light']);
+$exists = $session->has('theme');
+$all = $session->all();
 $session->remove('theme');
 
-// Get all user object properties as array
-$all = $session->all();
+$session->flash('success', 'Saved');
+$message = $session->getFlash('success'); // reads and removes
 ```
 
-## Flash Messages
+Mutable attributes are stored separately from canonical identity and merged
+into the `user()` stdClass while authenticated. `id`, `uniqueid`, identity
+fields, group, and rank cannot be changed through `set()` or `remove()`.
 
-Flash messages persist for one request only.
+Attributes and flash accept bounded scalars and arrays. Sensitive keys,
+closures, resources, unsupported objects, recursion, excessive depth/items,
+invalid UTF-8, non-finite floats, and oversized values are rejected with
+`InvalidArgumentException`. A stored null counts as present.
 
-```php
-// Set flash message
-$session->flash('success', 'Profile updated!');
+Note the deliberate asymmetry: `login()` reports failure by returning `false`,
+while `set()` and `flash()` throw. Storage rejection is a programming error in
+the caller, not an authentication outcome.
 
-// Redirect...
+Session stores all of its state under one namespaced `$_SESSION` root key.
+Other root keys belong to the application and are never read. The v1.0 keys
+(`user`, `name`, `_expire`, `access_group`, `access_rank`, `location`) are swept
+exactly once, when a session is first upgraded to the 1.1 storage layout; after
+that the application may use those names freely without affecting the session.
 
-// Get and remove flash message
-if ($session->hasFlash('success')) {
-  echo $session->getFlash('success');
-}
-```
+Flash uses pull-until-read semantics: it remains available until `getFlash()`
+consumes it. It is not automatically aged after one request.
 
-## Session Expiry
+## Optional location enrichment
 
-```php
-// Get expiration timestamp
-$expires = $session->getExpiry();
-
-// Check if expired
-if ($session->isExpired()) {
-  // Re-authenticate
-}
-
-// Extend session by 30 minutes
-$session->extendExpiry(1800);
-```
-
-## Geolocation
-
-Requires `timefrontiers/php-location`:
+Location is disabled by default and never runs during login.
 
 ```php
-// Refresh location from IP
+$config = new SessionConfig(locationEnabled: true);
+$session = new Session(config: $config);
 $session->refreshLocation();
-
-// Access location data
-$loc = $session->location();
-if ($loc) {
-  echo $loc->country;       // "United States"
-  echo $loc->country_code;  // "US"
-  echo $loc->city;          // "San Francisco"
-  echo $loc->currency_code; // "USD"
-}
+$location = $session->location();
 ```
 
-## Logging
+When enabled without a resolver, `refreshLocation()` uses
+`timefrontiers/php-location` if installed. A trusted resolver may instead be
+provided through `locationResolver`. Optional failure returns `false` without a
+session error; `locationRequired: true` adds a stable error but still cannot
+change login or access rank.
 
-Pass a PSR-3 logger for session events:
+## Errors and logging
 
-```php
-use Monolog\Logger;
-use Monolog\Handler\StreamHandler;
+Errors are instance-owned canonical tuples:
 
-$logger = new Logger('session');
-$logger->pushHandler(new StreamHandler('session.log'));
-
-$session = new Session($logger);
+```text
+[minimum_rank, code, message, redacted_origin, redacted_line]
 ```
 
-## Error Handling
-
-Session uses static error collection for compatibility with InstanceError:
-
 ```php
-use TimeFrontiers\InstanceError;
-
-$session->login($invalidUser);
-
 if ($session->hasErrors()) {
-  $extractor = new InstanceError($session);
-  $errors = $extractor->get('login');
-
-  foreach ($errors as $err) {
-    echo $err[2]; // Error message
-  }
+  $errors = $session->getErrors();
 }
 
-// Clear errors
-Session::clearErrors();
+$session->clearInstanceErrors('login'); // this instance/context only
+$session->clearInstanceErrors();        // all errors on this instance
+Session::clearErrors();                  // compatibility: all live instances
 ```
 
-## Security Features
+`errorCount()`, `firstError()`, and `errorMessages()` from the underlying trait
+are intentionally not part of Session's public v1.1 API. Use `getErrors()` or an
+optional `InstanceError` presenter.
 
-- Session ID regeneration on login (prevents fixation)
-- Secure cookies (HTTPOnly, SameSite=Lax)
-- HTTPS-only cookies when available
-- Timing-safe CSRF token comparison (`hash_equals`)
-- Single-use CSRF tokens with automatic expiry pruning
-- No session ID regeneration on every request (prevents concurrency issues)
+Raw exception messages, provider payloads, paths, and request/session values are
+never copied into tuples. Original throwables are sent only to the configured
+PSR-3 logger. `timefrontiers/php-instance-error` is optional for rank-filtered
+presentation.
 
-## Dependencies
+## Validation
 
-- `psr/log` - For PSR-3 logger interface
-- `timefrontiers/php-core` - For AccessRank and AccessGroup enums
-- `timefrontiers/php-instance-error` - For error extraction
+```bash
+composer validate --strict
+composer check
+```
 
-## Optional Dependencies
-
-- `timefrontiers/php-location` - For IP geolocation
-
-## License
-
-MIT
+The test suite includes deterministic failure injection, isolated native PHP
+session-handler tests, and a loopback HTTP test proving that login rotates the
+cookie and the pre-login ID cannot restore authentication.
